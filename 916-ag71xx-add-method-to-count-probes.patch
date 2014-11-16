@@ -1,0 +1,29 @@
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
+@@ -161,6 +161,7 @@ struct ag71xx {
+ 	spinlock_t		lock;
+ 	struct platform_device	*pdev;
+ 	struct napi_struct	napi;
++	unsigned int		gmac_num;
+ 
+ 	/*
+ 	 * From this point onwards we're not looking at per-packet fields.
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
+@@ -13,6 +13,8 @@
+ 
+ #include "ag71xx.h"
+ 
++static int ag71xx_gmac_num = 0;
++
+ #define AG71XX_DEFAULT_MSG_ENABLE	\
+ 	(NETIF_MSG_DRV			\
+ 	| NETIF_MSG_PROBE		\
+@@ -1236,6 +1238,7 @@ static int ag71xx_probe(struct platform_
+ 	ag->dev = dev;
+ 	ag->msg_enable = netif_msg_init(ag71xx_msg_level,
+ 					AG71XX_DEFAULT_MSG_ENABLE);
++	ag->gmac_num = ag71xx_gmac_num++;
+ 	spin_lock_init(&ag->lock);
+ 
+ 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mac_base");

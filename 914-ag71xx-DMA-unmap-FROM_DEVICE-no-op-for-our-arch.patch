@@ -1,0 +1,19 @@
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
+@@ -981,8 +981,14 @@ static int ag71xx_rx_packets(struct ag71
+ 		pktlen = desc->ctrl & pktlen_mask;
+ 		pktlen -= ETH_FCS_LEN;
+ 
+-		dma_unmap_single(&dev->dev, ring->buf[i].dma_addr,
+-				 ag->rx_buf_size, DMA_FROM_DEVICE);
++		/*
++		 * This is where we'd unmap our buffer from the GMAC in a
++		 * general use of the DMA API.  On a MIPS platform this would
++		 * be a complete no-op so we don't bother:
++		 *
++		 * dma_unmap_single(&dev->dev, curr->dma_addr,
++		 *                  rx_buf_size, DMA_FROM_DEVICE);
++		 */
+ 
+ 		dev->stats.rx_packets++;
+ 		dev->stats.rx_bytes += pktlen;

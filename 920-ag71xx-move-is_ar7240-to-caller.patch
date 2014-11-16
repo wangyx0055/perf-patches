@@ -1,0 +1,32 @@
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
+@@ -898,10 +898,9 @@ static bool ag71xx_check_dma_stuck(struc
+ 	return false;
+ }
+ 
+-static int ag71xx_tx_packets(struct ag71xx *ag, struct net_device *dev)
++static int ag71xx_tx_packets(struct ag71xx *ag, struct net_device *dev, bool is_ar7240)
+ {
+ 	struct ag71xx_ring *ring = &ag->tx_ring;
+-	struct ag71xx_platform_data *pdata = ag71xx_get_pdata(ag);
+ 	int sent = 0;
+ 	int bytes_compl = 0;
+ 	int n = 0;
+@@ -914,7 +913,7 @@ static int ag71xx_tx_packets(struct ag71
+ 		struct sk_buff *skb = ring->buf[i].skb;
+ 
+ 		if (!ag71xx_desc_empty(desc)) {
+-			if (pdata->is_ar7240) {
++			if (is_ar7240) {
+ 				if (unlikely(ag71xx_check_dma_stuck(ag, dev))) {
+ 					schedule_work(&ag->restart_work);
+ 				}
+@@ -1047,7 +1046,7 @@ static int ag71xx_poll(struct napi_struc
+ 	int rx_done;
+ 
+ 	pdata->ddr_flush();
+-	tx_done = ag71xx_tx_packets(ag, dev);
++	tx_done = ag71xx_tx_packets(ag, dev, pdata->is_ar7240);
+ 
+ 	DBG("%s: processing RX ring\n", dev->name);
+ 	rx_done = ag71xx_rx_packets(ag, limit);

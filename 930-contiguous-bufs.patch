@@ -1,0 +1,81 @@
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
+@@ -172,6 +172,7 @@ struct ag71xx {
+ 	/*
+ 	 * From this point onwards we're not looking at per-packet fields.
+ 	 */
++	struct ag71xx_buf	*ring_bufs;
+ 	void __iomem		*mac_base;
+ 	u32			msg_enable;
+ 
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
+@@ -107,8 +107,6 @@ static inline void ag71xx_dump_intr(stru
+ 
+ static void ag71xx_ring_free(struct ag71xx_ring *ring)
+ {
+-	kfree(ring->buf);
+-
+ 	if (ring->descs_cpu) {
+ 		if (ring->iomem) {
+ 			iounmap(ring->iomem);
+@@ -119,7 +117,7 @@ static void ag71xx_ring_free(struct ag71
+ 	}
+ }
+ 
+-static int ag71xx_ring_alloc(struct ag71xx_ring *ring, unsigned int id)
++static int ag71xx_ring_alloc(struct ag71xx *ag, struct ag71xx_ring *ring, unsigned int id)
+ {
+ 	int err;
+ 	int i;
+@@ -158,10 +156,12 @@ static int ag71xx_ring_alloc(struct ag71
+ #ifdef CONFIG_AG71XX_SRAM_DESCRIPTORS
+ descs_allocated:
+ #endif /* CONFIG_AG71XX_SRAM_DESCRIPTORS */
+-	ring->buf = kzalloc(ring->size * sizeof(*ring->buf), GFP_KERNEL);
+-	if (!ring->buf) {
+-		err = -ENOMEM;
+-		goto err;
++	if ((id & 1) == 0) {
++		/* TX buf */
++		ring->buf = ag->ring_bufs;
++	} else {
++		/* RX buf */
++		ring->buf = ag->ring_bufs + ag->tx_ring.size;
+ 	}
+ 
+ 	for (i = 0; i < ring->size; i++) {
+@@ -342,15 +342,22 @@ static int ag71xx_ring_rx_refill(struct
+ 
+ static int ag71xx_rings_init(struct ag71xx *ag)
+ {
++	unsigned int rings_total;
+ 	int ret;
+ 
+-	ret = ag71xx_ring_alloc(&ag->tx_ring, (ag->gmac_num * 2));
++	rings_total = ag->tx_ring.size + ag->rx_ring.size;
++	ag->ring_bufs = kzalloc(rings_total * sizeof(struct ag71xx_buf),
++				GFP_KERNEL);
++	if (!ag->ring_bufs)
++		return -ENOMEM;
++
++	ret = ag71xx_ring_alloc(ag, &ag->tx_ring, ag->gmac_num * 2);
+ 	if (ret)
+ 		return ret;
+ 
+ 	ag71xx_ring_tx_init(ag);
+ 
+-	ret = ag71xx_ring_alloc(&ag->rx_ring, (ag->gmac_num * 2) + 1);
++	ret = ag71xx_ring_alloc(ag, &ag->rx_ring, ag->gmac_num * 2 + 1);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -366,6 +373,8 @@ static void ag71xx_rings_cleanup(struct
+ 	ag71xx_ring_tx_clean(ag);
+ 	netdev_reset_queue(ag->dev);
+ 	ag71xx_ring_free(&ag->tx_ring);
++
++	kfree(ag->ring_bufs);
+ }
+ 
+ static unsigned char *ag71xx_speed_str(struct ag71xx *ag)

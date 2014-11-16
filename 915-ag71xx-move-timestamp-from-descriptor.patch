@@ -1,0 +1,84 @@
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx.h
+@@ -93,10 +93,7 @@ struct ag71xx_buf {
+ 		void		*rx_buf;
+ 	};
+ 	struct ag71xx_desc	*desc;
+-	union {
+-		dma_addr_t	dma_addr;
+-		unsigned long	timestamp;
+-	};
++	dma_addr_t		dma_addr;
+ 	unsigned int		len;
+ };
+ 
+--- a/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
++++ b/drivers/net/ethernet/atheros/ag71xx/ag71xx_main.c
+@@ -762,7 +762,6 @@ static netdev_tx_t ag71xx_hard_start_xmi
+ 	i = (ring->curr + n - 1) % ring->size;
+ 	ring->buf[i].len = skb->len;
+ 	ring->buf[i].skb = skb;
+-	ring->buf[i].timestamp = jiffies;
+ 
+ 	netdev_sent_queue(dev, skb->len);
+ 
+@@ -783,6 +782,8 @@ static netdev_tx_t ag71xx_hard_start_xmi
+ 
+ 	DBG("%s: packet injected into TX queue\n", ag->dev->name);
+ 
++	dev->trans_start = jiffies;
++
+ 	/* enable TX engine */
+ 	ag71xx_wr(ag, AG71XX_REG_TX_CTRL, TX_CTRL_TXE);
+ 
+@@ -872,14 +873,14 @@ static void ag71xx_restart_work_func(str
+ 	ag71xx_open(ag->dev);
+ }
+ 
+-static bool ag71xx_check_dma_stuck(struct ag71xx *ag, unsigned long timestamp)
++static bool ag71xx_check_dma_stuck(struct ag71xx *ag, struct net_device *dev)
+ {
+ 	u32 rx_sm, tx_sm, rx_fd;
+ 
+-	if (likely(time_before(jiffies, timestamp + HZ/10)))
++	if (likely(time_before(jiffies, dev->trans_start + HZ/10)))
+ 		return false;
+ 
+-	if (!netif_carrier_ok(ag->dev))
++	if (!netif_carrier_ok(dev))
+ 		return false;
+ 
+ 	rx_sm = ag71xx_rr(ag, AG71XX_REG_RX_SM);
+@@ -895,7 +896,7 @@ static bool ag71xx_check_dma_stuck(struc
+ 	return false;
+ }
+ 
+-static int ag71xx_tx_packets(struct ag71xx *ag)
++static int ag71xx_tx_packets(struct ag71xx *ag, struct net_device *dev)
+ {
+ 	struct ag71xx_ring *ring = &ag->tx_ring;
+ 	struct ag71xx_platform_data *pdata = ag71xx_get_pdata(ag);
+@@ -911,9 +912,11 @@ static int ag71xx_tx_packets(struct ag71
+ 		struct sk_buff *skb = ring->buf[i].skb;
+ 
+ 		if (!ag71xx_desc_empty(desc)) {
+-			if (pdata->is_ar7240 &&
+-			    ag71xx_check_dma_stuck(ag, ring->buf[i].timestamp))
+-				schedule_work(&ag->restart_work);
++			if (pdata->is_ar7240) {
++				if (unlikely(ag71xx_check_dma_stuck(ag, dev))) {
++					schedule_work(&ag->restart_work);
++				}
++			}
+ 			break;
+ 		}
+ 
+@@ -1042,7 +1045,7 @@ static int ag71xx_poll(struct napi_struc
+ 	int rx_done;
+ 
+ 	pdata->ddr_flush();
+-	tx_done = ag71xx_tx_packets(ag);
++	tx_done = ag71xx_tx_packets(ag, dev);
+ 
+ 	DBG("%s: processing RX ring\n", dev->name);
+ 	rx_done = ag71xx_rx_packets(ag, limit);
