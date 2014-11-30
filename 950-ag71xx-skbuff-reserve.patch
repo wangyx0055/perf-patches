@@ -1,0 +1,177 @@
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -64,6 +64,7 @@
+ #include <linux/prefetch.h>
+ #include <linux/if_vlan.h>
+ #include <linux/if.h>
++#include <linux/cpu.h>
+ 
+ #include <net/protocol.h>
+ #include <net/dst.h>
+@@ -78,6 +79,9 @@
+ 
+ struct kmem_cache *skbuff_head_cache __read_mostly;
+ static struct kmem_cache *skbuff_fclone_cache __read_mostly;
++static DEFINE_PER_CPU(struct sk_buff_head, recycle_list);
++#define SKB_RECYCLE_SIZE	2048
++#define SKB_RECYCLE_MAX_SKBS	2048
+ 
+ /**
+  *	skb_panic - private function for out-of-line support
+@@ -413,8 +417,45 @@ struct sk_buff *__netdev_alloc_skb(struc
+ 				   unsigned int length, gfp_t gfp_mask)
+ {
+ 	struct sk_buff *skb = NULL;
+-	unsigned int fragsz = SKB_DATA_ALIGN(length + NET_SKB_PAD) +
+-			      SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
++	unsigned int fragsz;
++
++	/*
++	 * check if we can use a recycled skb
++	 */
++	if (likely(length <= SKB_RECYCLE_SIZE)) {
++		unsigned long flags;
++		struct sk_buff_head *h = &get_cpu_var(recycle_list);
++		local_irq_save(flags);
++		skb  = __skb_dequeue(h);
++
++		/* set the length of the skb that will be allocated
++		 * if the recycling fails
++		 */
++		if (likely(skb_queue_len(h)) < SKB_RECYCLE_MAX_SKBS)
++			length = SKB_RECYCLE_SIZE;
++
++		local_irq_restore(flags);
++		put_cpu_var(recycle_list);
++		if (likely(skb)) {
++			struct skb_shared_info *s = skb_shinfo(skb);
++			memset(s, 0, offsetof(struct skb_shared_info, dataref));
++			atomic_set(&s->dataref, 1);
++
++			memset(skb, 0, offsetof(struct sk_buff, tail));
++			skb->data = skb->head;
++			skb_reset_tail_pointer(skb);
++
++			skb->mac_header = (typeof(skb->mac_header))~0U;
++			skb->transport_header = (typeof(skb->transport_header))~0U;
++
++			skb_reserve(skb, NET_SKB_PAD);
++			skb->dev = dev;
++			return skb;
++		}
++	}
++
++	fragsz = SKB_DATA_ALIGN(length + NET_SKB_PAD) +
++		SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
+ 
+ 	if (fragsz <= PAGE_SIZE && !(gfp_mask & (__GFP_WAIT | GFP_DMA))) {
+ 		void *data;
+@@ -670,6 +711,31 @@ void skb_tx_error(struct sk_buff *skb)
+ }
+ EXPORT_SYMBOL(skb_tx_error);
+ 
++static inline bool consume_skb_can_recycle(const struct sk_buff *skb,
++						int skb_size)
++{
++	if (unlikely(irqs_disabled()))
++		return false;
++
++	if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_DEV_ZEROCOPY))
++		return false;
++
++	if (unlikely(skb_is_nonlinear(skb)))
++		return false;
++
++	if (unlikely(skb->fclone != SKB_FCLONE_UNAVAILABLE))
++		return false;
++
++	skb_size = SKB_DATA_ALIGN(skb_size + NET_SKB_PAD);
++	if (unlikely(skb_end_pointer(skb) - skb->head < skb_size))
++		return false;
++
++	if (unlikely(skb_cloned(skb)))
++		return false;
++
++	return true;
++}
++
+ /**
+  *	consume_skb - free an skbuff
+  *	@skb: buffer to free
+@@ -686,8 +752,36 @@ void consume_skb(struct sk_buff *skb)
+ 		smp_rmb();
+ 	else if (likely(!atomic_dec_and_test(&skb->users)))
+ 		return;
++
++	/*
++	 * If possible we'd like to recycle any skb rather than just free it,
++	 * but in order to do that we need to release any head state too.
++	 * We don't want to do this later because we'll be in a pre-emption
++	 * disabled state.
++	 */
++	skb_release_head_state(skb);
++
++	if (likely(consume_skb_can_recycle(skb, SKB_RECYCLE_SIZE))) {
++		unsigned long flags;
++		struct sk_buff_head *h = &get_cpu_var(recycle_list);
++
++		local_irq_save(flags);
++		if (likely(skb_queue_len(h) < SKB_RECYCLE_MAX_SKBS)) {
++			__skb_queue_head(h, skb);
++			local_irq_restore(flags);
++			put_cpu_var(recycle_list);
++			return;
++		}
++		local_irq_restore(flags);
++		put_cpu_var(recycle_list);
++	}
++
+ 	trace_consume_skb(skb);
+-	__kfree_skb(skb);
++
++	if (likely(skb->head))
++		skb_release_data(skb);
++
++	kfree_skbmem(skb);
+ }
+ EXPORT_SYMBOL(consume_skb);
+ 
+@@ -3237,8 +3331,23 @@ done:
+ }
+ EXPORT_SYMBOL_GPL(skb_gro_receive);
+ 
++static int skb_cpu_callback(struct notifier_block *nfb,
++			    unsigned long action, void *ocpu)
++{
++	unsigned long oldcpu = (unsigned long)ocpu;
++
++	if (action == CPU_DEAD || action == CPU_DEAD_FROZEN) {
++		struct sk_buff_head *h = &per_cpu(recycle_list, oldcpu);
++		skb_queue_purge(h);
++	}
++
++	return NOTIFY_OK;
++}
++
+ void __init skb_init(void)
+ {
++	int cpu;
++
+ 	skbuff_head_cache = kmem_cache_create("skbuff_head_cache",
+ 					      sizeof(struct sk_buff),
+ 					      0,
+@@ -3250,6 +3359,14 @@ void __init skb_init(void)
+ 						0,
+ 						SLAB_HWCACHE_ALIGN|SLAB_PANIC,
+ 						NULL);
++
++	for_each_possible_cpu(cpu) {
++		struct sk_buff_head *h = &per_cpu(recycle_list, cpu);
++		skb_queue_head_init(h);
++		printk(KERN_INFO "Initialized recycle list for cpu %d.\n", cpu);
++	}
++
++	hotcpu_notifier(skb_cpu_callback, 0);
+ }
+ 
+ /**
